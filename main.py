@@ -180,7 +180,7 @@ class Main():
         
         if self.datestr is None:
             now = datetime.now()
-            self.datestr = now.strftime('%m|%d-%H:%M:%S')
+            self.datestr = now.strftime('%m%d-%H%M%S')
         datestr = self.datestr          
 
         paths = [
@@ -255,7 +255,8 @@ if __name__ == "__main__":
     main = Main(train_config, env_config, debug=False)
     main.run()
 
-
+# in the command line:
+# python main.py -dataset msl -device cpu
 
 
 
