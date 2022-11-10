@@ -1,3 +1,4 @@
+#!/bin/sh
 gpu_n=$1
 DATASET=$2
 
@@ -19,8 +20,7 @@ COMMENT="${DATASET}"
 EPOCH=30
 report='best'
 
-if [[ "$gpu_n" == "cpu" ]]; then
-    python main.py \
+python main.py \
         -dataset $DATASET \
         -save_path_pattern $path_pattern \
         -slide_stride $SLIDE_STRIDE \
@@ -38,22 +38,7 @@ if [[ "$gpu_n" == "cpu" ]]; then
         -report $report \
         -topk $topk \
         -device 'cpu'
-else
-    CUDA_VISIBLE_DEVICES=$gpu_n  python main.py \
-        -dataset $DATASET \
-        -save_path_pattern $path_pattern \
-        -slide_stride $SLIDE_STRIDE \
-        -slide_win $SLIDE_WIN \
-        -batch $BATCH_SIZE \
-        -epoch $EPOCH \
-        -comment $COMMENT \
-        -random_seed $seed \
-        -decay $decay \
-        -dim $dim \
-        -out_layer_num $out_layer_num \
-        -out_layer_inter_dim $out_layer_inter_dim \
-        -decay $decay \
-        -val_ratio $val_ratio \
-        -report $report \
-        -topk $topk
-fi
+
+
+#conda activate gdn_old
+#python main.py -dataset msl -device cpu

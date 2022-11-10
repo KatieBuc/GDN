@@ -35,7 +35,6 @@ import random
 
 class Main():
     def __init__(self, train_config, env_config, debug=False):
-
         self.train_config = train_config
         self.env_config = env_config
         self.datestr = None
@@ -105,8 +104,9 @@ class Main():
         else:
             model_save_path = self.get_save_path()[0]
 
-            self.train_log = train(self.model, model_save_path, 
-                config = train_config,
+            self.train_log = train(self.model,
+                model_save_path, 
+                config = self.train_config, ## train_config self??
                 train_dataloader=self.train_dataloader,
                 val_dataloader=self.val_dataloader, 
                 feature_map=self.feature_map,
@@ -115,6 +115,7 @@ class Main():
                 train_dataset=self.train_dataset,
                 dataset_name=self.env_config['dataset']
             )
+        
         
         # test            
         self.model.load_state_dict(torch.load(model_save_path))
@@ -180,12 +181,12 @@ class Main():
         
         if self.datestr is None:
             now = datetime.now()
-            self.datestr = now.strftime('%m|%d-%H:%M:%S')
+            self.datestr = now.strftime('%m%d-%H%M%S')
         datestr = self.datestr          
 
         paths = [
-            f'./pretrained/{dir_path}/best_{datestr}.pt',
-            f'./results/{dir_path}/{datestr}.csv',
+            f'C:/Users/n10907700/repos/GDN/pretrained/{dir_path}/best_{datestr}.pt',
+            f'C:/Users/n10907700/repos/GDN/results/{dir_path}/{datestr}.csv',
         ]
 
         for path in paths:
@@ -203,9 +204,9 @@ if __name__ == "__main__":
     parser.add_argument('-slide_win', help='slide_win', type = int, default=15)
     parser.add_argument('-dim', help='dimension', type = int, default=64)
     parser.add_argument('-slide_stride', help='slide_stride', type = int, default=5)
-    parser.add_argument('-save_path_pattern', help='save path pattern', type = str, default='')
-    parser.add_argument('-dataset', help='wadi / swat', type = str, default='wadi')
-    parser.add_argument('-device', help='cuda / cpu', type = str, default='cuda')
+    parser.add_argument('-save_path_pattern', help='save path pattern', type = str, default='msl')
+    parser.add_argument('-dataset', help='wadi / swat', type = str, default='msl')
+    parser.add_argument('-device', help='cuda / cpu', type = str, default='cpu')
     parser.add_argument('-random_seed', help='random seed', type = int, default=0)
     parser.add_argument('-comment', help='experiment comment', type = str, default='')
     parser.add_argument('-out_layer_num', help='outlayer num', type = int, default=1)
@@ -251,11 +252,11 @@ if __name__ == "__main__":
         'load_model_path': args.load_model_path
     }
     
+    mainn = Main(train_config, env_config, debug=False)
+    mainn.run()
 
-    main = Main(train_config, env_config, debug=False)
-    main.run()
+    with open('test_result.txt', 'w') as f:
+        for line in mainn.test_result:
+            f.write(f"{line}\n")
 
-
-
-
-
+    ### save attack infos

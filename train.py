@@ -37,7 +37,6 @@ def train(model = None, save_path = '', config={},  train_dataloader=None, val_d
 
     device = get_device()
 
-
     acu_loss = 0
     min_loss = 1e+8
     min_f1 = 0
@@ -66,12 +65,13 @@ def train(model = None, save_path = '', config={},  train_dataloader=None, val_d
             x, labels, edge_index = [item.float().to(device) for item in [x, labels, edge_index]]
 
             optimizer.zero_grad()
-            out = model(x, edge_index).float().to(device)
+
+            out = model(x, edge_index).float().to(device) #def forward(self, data, org_edge_index)
+            
             loss = loss_func(out, labels)
             
             loss.backward()
             optimizer.step()
-
             
             train_loss_list.append(loss.item())
             acu_loss += loss.item()

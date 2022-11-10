@@ -71,6 +71,7 @@ class GNNLayer(nn.Module):
     def forward(self, x, edge_index, embedding=None, node_num=0):
 
         out, (new_edge_index, att_weight) = self.gnn(x, edge_index, embedding, return_attention_weights=True)
+        
         self.att_weight_1 = att_weight
         self.edge_index_1 = new_edge_index
   
@@ -140,32 +141,35 @@ class GDN(nn.Module):
             
             batch_edge_index = self.cache_edge_index_sets[i]
             
-            all_embeddings = self.embedding(torch.arange(node_num).to(device))
+            all_embeddings = self.embedding(torch.arange(node_num).to(device)) # v_i's
 
             weights_arr = all_embeddings.detach().clone()
             all_embeddings = all_embeddings.repeat(batch_num, 1)
 
             weights = weights_arr.view(node_num, -1)
 
-            cos_ji_mat = torch.matmul(weights, weights.T)
+            cos_ji_mat = torch.matmul(weights, weights.T) # e_{ji} in eqn (2)
             normed_mat = torch.matmul(weights.norm(dim=-1).view(-1,1), weights.norm(dim=-1).view(1,-1))
-            cos_ji_mat = cos_ji_mat / normed_mat
+            cos_ji_mat = cos_ji_mat / normed_mat 
 
             dim = weights.shape[-1]
             topk_num = self.topk
 
-            topk_indices_ji = torch.topk(cos_ji_mat, topk_num, dim=-1)[1]
+            topk_indices_ji = torch.topk(cos_ji_mat, topk_num, dim=-1)[1] # A_{ji} in eqn (3)
 
-            self.learned_graph = topk_indices_ji
+            self.learned_graph = topk_indices_ji 
 
-            gated_i = torch.arange(0, node_num).T.unsqueeze(1).repeat(1, topk_num).flatten().to(device).unsqueeze(0)
+            gated_i_ = torch.arange(0, node_num)
+            gated_i = gated_i_.permute(*torch.arange(gated_i_.ndim - 1, -1, -1)).unsqueeze(1).repeat(1, topk_num).flatten().to(device).unsqueeze(0)
+            #gated_i = torch.arange(0, node_num).T.unsqueeze(1).repeat(1, topk_num).flatten().to(device).unsqueeze(0)
             gated_j = topk_indices_ji.flatten().unsqueeze(0)
             gated_edge_index = torch.cat((gated_j, gated_i), dim=0)
 
             batch_gated_edge_index = get_batch_edge_index(gated_edge_index, batch_num, node_num).to(device)
+
             gcn_out = self.gnn_layers[i](x, batch_gated_edge_index, node_num=node_num*batch_num, embedding=all_embeddings)
 
-            
+
             gcn_outs.append(gcn_out)
 
         x = torch.cat(gcn_outs, dim=1)
@@ -174,15 +178,16 @@ class GDN(nn.Module):
 
         indexes = torch.arange(0,node_num).to(device)
         out = torch.mul(x, self.embedding(indexes))
+
+
         
         out = out.permute(0,2,1)
-        out = F.relu(self.bn_outlayer_in(out))
+        out = F.relu(self.bn_outlayer_in(out)) # eqn (5)
         out = out.permute(0,2,1)
 
         out = self.dp(out)
         out = self.out_layer(out)
         out = out.view(-1, node_num)
-   
 
         return out
         
