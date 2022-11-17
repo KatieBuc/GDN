@@ -368,6 +368,7 @@ class GNNAD:
         load_model_name: str = "",
         early_stop_win: int = 15,
         lr: float = 0.001,
+        shuffle_train: bool = True,
     ):
 
         self.batch = batch
@@ -388,6 +389,7 @@ class GNNAD:
         self.load_model_name = load_model_name
         self.early_stop_win = early_stop_win
         self.lr = lr
+        self.shuffle_train = shuffle_train
 
     def _set_seeds(self):
         random.seed(self.random_seed)
@@ -458,21 +460,22 @@ class GNNAD:
 
         # get data loaders
         train_dataloader = DataLoader(
-            train_subset, batch_size=self.batch, shuffle=False, num_workers=0
-        )  # FIXME: shuffle=True
+            train_subset,
+            batch_size=self.batch,
+            shuffle=self.shuffle_train,
+            num_workers=0,
+        )
 
         validate_dataloader = DataLoader(
             validate_subset,
             batch_size=self.batch,
             shuffle=False,
-            num_workers=0,  # FIXME: num_workers=0
         )
 
         test_dataloader = DataLoader(
             test_dataset,
             batch_size=self.batch,
             shuffle=False,
-            num_workers=0,  # FIXME: num_workers=0
         )
 
         # save to self
