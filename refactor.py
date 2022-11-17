@@ -20,11 +20,6 @@ from torch_geometric.utils import add_self_loops, remove_self_loops, softmax
 
 from datasets.TimeDataset import TimeDataset
 
-# TODO: fix this
-random.seed(0)
-np.random.seed(0)
-torch.manual_seed(0)
-
 
 class GraphLayer(MessagePassing):
     """
@@ -244,8 +239,6 @@ class GDN(nn.Module):
     def _initialise_layers(self):
 
         self.embedding = nn.Embedding(self.n_nodes, self.embed_dim)
-        nn.init.kaiming_uniform_(self.embedding.weight, a=math.sqrt(5))
-
         self.bn_outlayer_in = nn.BatchNorm1d(self.embed_dim)
 
         self.gnn_layers = nn.ModuleList(
@@ -269,8 +262,9 @@ class GDN(nn.Module):
         self.cache_embed_index = None
 
         self.dp = nn.Dropout(0.2)
+        nn.init.kaiming_uniform_(self.embedding.weight, a=math.sqrt(5))
 
-    def forward(self, data):
+    def forward(self, data, org_edge_index=None):  # FIXME
 
         x = data.clone().detach()
         device = data.device
@@ -395,6 +389,11 @@ class GNNAD:
         self.early_stop_win = early_stop_win
         self.lr = lr
 
+    def _set_seeds(self):
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+        torch.manual_seed(self.random_seed)
+
     def _split_train_validation(self, data):
 
         dataset_len = len(data)
@@ -458,14 +457,22 @@ class GNNAD:
         train_subset, validate_subset = self._split_train_validation(train_dataset)
 
         # get data loaders
-        train_dataloader = DataLoader(train_subset, batch_size=self.batch, shuffle=True)
+        train_dataloader = DataLoader(
+            train_subset, batch_size=self.batch, shuffle=False, num_workers=0
+        )  # FIXME: shuffle=True
 
         validate_dataloader = DataLoader(
-            validate_subset, batch_size=self.batch, shuffle=False
+            validate_subset,
+            batch_size=self.batch,
+            shuffle=False,
+            num_workers=0,  # FIXME: num_workers=0
         )
 
         test_dataloader = DataLoader(
-            test_dataset, batch_size=self.batch, shuffle=False, num_workers=0
+            test_dataset,
+            batch_size=self.batch,
+            shuffle=False,
+            num_workers=0,  # FIXME: num_workers=0
         )
 
         # save to self
@@ -637,6 +644,7 @@ class GNNAD:
         print(f"recall: {info[2]}\n")
 
     def fit(self):
+        self._set_seeds()
         self._load_data()
         self._load_model()
         self._get_model_path()
