@@ -369,6 +369,7 @@ class GNNAD:
         early_stop_win: int = 15,
         lr: float = 0.001,
         shuffle_train: bool = True,
+        threshold_type: str = None,
     ):
 
         self.batch = batch
@@ -390,6 +391,7 @@ class GNNAD:
         self.early_stop_win = early_stop_win
         self.lr = lr
         self.shuffle_train = shuffle_train
+        self.threshold_type = threshold_type
 
     def _set_seeds(self):
         random.seed(self.random_seed)
@@ -481,6 +483,7 @@ class GNNAD:
         # save to self
         self.fc_edge_idx = fc_edge_idx
         self.feature_list = feature_list
+        self.test_input = test_input
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
         self.train_dataloader = train_dataloader
@@ -559,7 +562,7 @@ class GNNAD:
 
         avg_loss = sum(test_loss_list) / len(test_loss_list)
 
-        return avg_loss, [test_predicted_list, test_ground_list, test_labels_list]
+        return avg_loss, np.array([test_predicted_list, test_ground_list, test_labels_list])
 
     def _train(self):
 
@@ -635,16 +638,52 @@ class GNNAD:
         _, self.test_result = self._test(best_model, self.test_dataloader)
         _, self.validate_result = self._test(best_model, self.validate_dataloader)
 
-        test_result = np.array(self.test_result)
-        test_labels = test_result[2, :, 0].tolist()
-        test_scores = get_full_err_scores(test_result)
+        test_labels = self.test_result[2, :, 0]
+        test_err_scores = get_full_err_scores(self.test_result)
+        validate_err_scores = get_full_err_scores(self.validate_result)
 
-        info = get_best_performance_data(test_scores, test_labels, topk=1)
+        topk_err_indices, topk_err_scores = aggregate_error_scores(test_err_scores, test_labels)
+
+        # get threshold value
+        if self.threshold_type == 'max_validation':
+            threshold = np.max(validate_err_scores)
+            f1 = None
+        else:
+            final_topk_fmeas, thresholds = eval_scores(
+                topk_err_scores, test_labels
+            )
+            th_i = final_topk_fmeas.index(max(final_topk_fmeas))
+            threshold = thresholds[th_i]
+            f1 = max(final_topk_fmeas)
+
+        # get prediction labels for decided threshold
+        pred_labels = np.zeros(len(topk_err_scores))
+        pred_labels[topk_err_scores > threshold] = 1
+
+        pred_labels = pred_labels.astype(int)
+        test_labels = test_labels.astype(int)
+
+        # calculate metrics
+        precision = precision_score(test_labels, pred_labels)
+        recall = recall_score(test_labels, pred_labels)
+        f1 = f1_score(test_labels, pred_labels) if f1 is None else f1
+        auc = roc_auc_score(test_labels, topk_err_scores)
+
+        # save to self
+        self.topk_err_indices = topk_err_indices
+        self.topk_err_scores = topk_err_scores
+        self.pred_labels = pred_labels
+        self.test_labels = test_labels
+        self.threshold = threshold
+        self.precision = precision
+        self.recall = recall
+        self.f1 = f1
+        self.auc = auc
 
         print("=========================** Result **============================\n")
-        print(f"F1 score: {info[0]}")
-        print(f"precision: {info[1]}")
-        print(f"recall: {info[2]}\n")
+        print(f"F1 score: {f1}")
+        print(f"precision: {precision}")
+        print(f"recall: {recall}\n")
 
     def fit(self):
         self._set_seeds()
@@ -687,7 +726,6 @@ def str_time_elapsed(start, i, total):
 
 
 def get_full_err_scores(test_result):
-    test_result = np.array(test_result)
 
     all_scores = None
     feature_num = test_result.shape[-1]
@@ -737,62 +775,41 @@ def get_err_median_and_iqr(predicted, groundtruth):
     return err_median, err_iqr
 
 
-def get_best_performance_data(total_err_scores, gt_labels, topk=1):
+def aggregate_error_scores(test_err_scores, test_labels, topk=1):
 
-    total_features = total_err_scores.shape[0]
+    total_features = test_err_scores.shape[0]
 
+    # finds topk feature idx of max scores for each time point
     topk_indices = np.argpartition(
-        total_err_scores, range(total_features - topk - 1, total_features), axis=0
+        test_err_scores, range(total_features - topk - 1, total_features), axis=0
     )[-topk:]
 
-    total_topk_err_scores = []
-
-    total_topk_err_scores = np.sum(
-        np.take_along_axis(total_err_scores, topk_indices, axis=0), axis=0
+    # for each time, sum the topk error scores
+    topk_err_scores = np.sum(
+        np.take_along_axis(test_err_scores, topk_indices, axis=0), axis=0
     )
 
-    final_topk_fmeas, thresolds = eval_scores(
-        total_topk_err_scores, gt_labels, 400, return_thresold=True
-    )
-
-    th_i = final_topk_fmeas.index(max(final_topk_fmeas))
-    thresold = thresolds[th_i]
-
-    pred_labels = np.zeros(len(total_topk_err_scores))
-    pred_labels[total_topk_err_scores > thresold] = 1
-
-    for i in range(len(pred_labels)):
-        pred_labels[i] = int(pred_labels[i])
-        gt_labels[i] = int(gt_labels[i])
-
-    pre = precision_score(gt_labels, pred_labels)
-    rec = recall_score(gt_labels, pred_labels)
-
-    auc_score = roc_auc_score(gt_labels, total_topk_err_scores)
-
-    return max(final_topk_fmeas), pre, rec, auc_score, thresold
+    return topk_indices, topk_err_scores
 
 
 # calculate F1 scores
-def eval_scores(scores, true_scores, th_steps, return_thresold=False):
+def eval_scores(scores, true_scores, th_steps=400):
     padding_list = [0] * (len(true_scores) - len(scores))
 
     if len(padding_list) > 0:
         scores = padding_list + scores
 
-    scores_sorted = rankdata(scores, method="ordinal")
+    scores_rank = rankdata(scores, method="ordinal") # rank of score
     th_vals = np.array(range(th_steps)) * 1.0 / th_steps
     fmeas = [None] * th_steps
     thresholds = [None] * th_steps
 
     for i in range(th_steps):
-        cur_pred = scores_sorted > th_vals[i] * len(scores)
 
+        cur_pred = scores_rank > th_vals[i] * len(scores)
         fmeas[i] = f1_score(true_scores, cur_pred)
 
-        score_index = scores_sorted.tolist().index(int(th_vals[i] * len(scores) + 1))
+        score_index = scores_rank.tolist().index(int(th_vals[i] * len(scores) + 1))
         thresholds[i] = scores[score_index]
 
-    if return_thresold:
-        return fmeas, thresholds
-    return fmeas
+    return fmeas, thresholds
