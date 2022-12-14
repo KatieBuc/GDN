@@ -417,17 +417,13 @@ class GNNAD:
 
         return train_subset, validate_subset
 
-    def _load_data(self):
+    def _load_data(self, X_train, X_test, y_test):
 
-        train = pd.read_csv(
-            f"./data/{self.data_subdir}/train.csv", sep=",", index_col=0
-        )
-        test = pd.read_csv(f"./data/{self.data_subdir}/test.csv", sep=",", index_col=0)
+        X_train.columns = X_train.columns.astype(str)
+        X_test.columns = X_test.columns.astype(str)
 
-        train = train.drop(columns=["attack"]) if "attack" in train.columns else train
-
-        feature_list = train.columns[
-            train.columns.str[0] != "_"
+        feature_list = X_train.columns[
+            X_train.columns.str[0] != "_"
         ].to_list()  # convention is to pass non-features as '_'
         assert len(feature_list) == len(set(feature_list))
 
@@ -435,20 +431,20 @@ class GNNAD:
             ft: [x for x in feature_list if x != ft] for ft in feature_list
         }  # fully connected structure
 
-        edge__idx_tuples = [
+        edge_idx_tuples = [
             (feature_list.index(child), feature_list.index(node_name))
             for node_name, node_list in fc_struc.items()
             for child in node_list
         ]
 
         fc_edge_idx = [
-            [x[0] for x in edge__idx_tuples],
-            [x[1] for x in edge__idx_tuples],
+            [x[0] for x in edge_idx_tuples],
+            [x[1] for x in edge_idx_tuples],
         ]
         fc_edge_idx = torch.tensor(fc_edge_idx, dtype=torch.long)
 
-        train_input = parse_data(train, feature_list)
-        test_input = parse_data(test, feature_list, labels=test.attack.tolist())
+        train_input = parse_data(X_train, feature_list)
+        test_input = parse_data(X_test, feature_list, labels=y_test)
 
         cfg = {
             "slide_win": self.slide_win,
@@ -483,6 +479,7 @@ class GNNAD:
         # save to self
         self.fc_edge_idx = fc_edge_idx
         self.feature_list = feature_list
+        self.n_nodes = len(feature_list)
         self.test_input = test_input
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
@@ -494,7 +491,7 @@ class GNNAD:
         # instantiate model
         model = GDN(
             self.fc_edge_idx,
-            n_nodes=len(self.feature_list),
+            n_nodes=self.n_nodes,
             input_dim=self.slide_win,
             out_layer_num=self.out_layer_num,
             out_layer_inter_dim=self.out_layer_inter_dim,
@@ -506,7 +503,6 @@ class GNNAD:
         self.model = model
 
     def _get_model_path(self):
-        # f'./results/{self.data_subdir}/{model_name}.csv'
 
         datestr = datetime.now().strftime("%m%d-%H%M%S")
         model_name = datestr if len(self.load_model_name) == 0 else self.load_model_name
@@ -562,7 +558,9 @@ class GNNAD:
 
         avg_loss = sum(test_loss_list) / len(test_loss_list)
 
-        return avg_loss, np.array([test_predicted_list, test_ground_list, test_labels_list])
+        return avg_loss, np.array(
+            [test_predicted_list, test_ground_list, test_labels_list]
+        )
 
     def _train(self):
 
@@ -642,16 +640,16 @@ class GNNAD:
         test_err_scores = get_full_err_scores(self.test_result)
         validate_err_scores = get_full_err_scores(self.validate_result)
 
-        topk_err_indices, topk_err_scores = aggregate_error_scores(test_err_scores, test_labels)
+        topk_err_indices, topk_err_scores = aggregate_error_scores(
+            test_err_scores, test_labels
+        )
 
         # get threshold value
-        if self.threshold_type == 'max_validation':
+        if self.threshold_type == "max_validation":
             threshold = np.max(validate_err_scores)
             f1 = None
         else:
-            final_topk_fmeas, thresholds = eval_scores(
-                topk_err_scores, test_labels
-            )
+            final_topk_fmeas, thresholds = eval_scores(topk_err_scores, test_labels)
             th_i = final_topk_fmeas.index(max(final_topk_fmeas))
             threshold = thresholds[th_i]
             f1 = max(final_topk_fmeas)
@@ -685,9 +683,9 @@ class GNNAD:
         print(f"precision: {precision}")
         print(f"recall: {recall}\n")
 
-    def fit(self):
+    def fit(self, X_train, X_test, y_test):
         self._set_seeds()
-        self._load_data()
+        self._load_data(X_train, X_test, y_test)
         self._load_model()
         self._get_model_path()
         self._train()
@@ -701,8 +699,12 @@ def loss_func(y_pred, y_true):
 
 
 def parse_data(data, feature_list, labels=None):
-
-    labels = [0] * data.shape[0] if labels == None else labels
+    """ "
+    In the case of training data, fill the last column with zeros. This is an
+    implicit assumption in the uhnsupervised training case - that the data is
+    non-anomalous. For the test data, keep the labels.
+    """
+    labels = [0] * data.shape[0] if labels is None else labels
     res = data[feature_list].T.values.tolist()
     res.append(labels)
     return res
@@ -799,7 +801,7 @@ def eval_scores(scores, true_scores, th_steps=400):
     if len(padding_list) > 0:
         scores = padding_list + scores
 
-    scores_rank = rankdata(scores, method="ordinal") # rank of score
+    scores_rank = rankdata(scores, method="ordinal")  # rank of score
     th_vals = np.array(range(th_steps)) * 1.0 / th_steps
     fmeas = [None] * th_steps
     thresholds = [None] * th_steps
