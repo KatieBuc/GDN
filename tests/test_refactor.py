@@ -52,7 +52,7 @@ def test_fitted_model():
     _[1] https://github.com/d-ailin/GDN
     """
 
-    model = GNNAD(shuffle_train=False, topk=2, epoch=10)
+    model = GNNAD(shuffle_train=False, topk=2, epoch=10, save_model_name="test")
     fitted_model = model.fit(X_train, X_test, y_test)
 
     f1_actual = fitted_model.f1
@@ -87,7 +87,11 @@ def test_fitted_model():
     """
 
     model = GNNAD(
-        shuffle_train=False, topk=2, epoch=10, threshold_type="max_validation"
+        shuffle_train=False,
+        topk=2,
+        epoch=10,
+        threshold_type="max_validation",
+        save_model_name="test",
     )
     fitted_model = model.fit(X_train, X_test, y_test)
 

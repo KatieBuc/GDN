@@ -365,7 +365,7 @@ class GNNAD:
         data_subdir: str = "msl",
         device: str = "cpu",
         report: str = "best",
-        load_model_name: str = "",
+        save_model_name: str = "",
         early_stop_win: int = 15,
         lr: float = 0.001,
         shuffle_train: bool = True,
@@ -387,7 +387,7 @@ class GNNAD:
         self.data_subdir = data_subdir
         self.device = device
         self.report = report
-        self.load_model_name = load_model_name
+        self.save_model_name = save_model_name
         self.early_stop_win = early_stop_win
         self.lr = lr
         self.shuffle_train = shuffle_train
@@ -505,7 +505,7 @@ class GNNAD:
     def _get_model_path(self):
 
         datestr = datetime.now().strftime("%m%d-%H%M%S")
-        model_name = datestr if len(self.load_model_name) == 0 else self.load_model_name
+        model_name = datestr if len(self.save_model_name) == 0 else self.save_model_name
         model_path = f"./pretrained/{self.data_subdir}/{model_name}.pt"
         dirname = os.path.dirname(model_path)
         Path(dirname).mkdir(parents=True, exist_ok=True)
