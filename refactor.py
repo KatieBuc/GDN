@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,33 +35,36 @@ class GraphLayer(MessagePassing):
         in_channels,
         out_channels,
         heads=1,
-        concat=True,
+        concat_heads=True,
         negative_slope=0.2,
         dropout=0,
-        bias=True,
+        with_bias=True,
     ):
         super(GraphLayer, self).__init__(aggr="add")
 
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.heads = heads
-        self.concat = concat
+        self.concat_heads = concat_heads
         self.negative_slope = negative_slope
         self.dropout = dropout
+        self.with_bias = with_bias
 
-        self.__alpha__ = None
-
+        # parameters related to weight matrix W
         self.lin = Linear(in_channels, heads * out_channels, bias=False)
 
+        # attention parameters related to x_i, x_j
         self.att_i = Parameter(torch.Tensor(1, heads, out_channels))
         self.att_j = Parameter(torch.Tensor(1, heads, out_channels))
+
+        # attention parameters related embeddings v_i, v_j
         self.att_em_i = Parameter(torch.Tensor(1, heads, out_channels))
         self.att_em_j = Parameter(torch.Tensor(1, heads, out_channels))
 
-        if bias and concat:
-            self.bias = Parameter(torch.Tensor(heads * out_channels))
-        elif bias and not concat:
-            self.bias = Parameter(torch.Tensor(out_channels))
+        # if concatenating the across heads, consider the change of out_channels
+        self._out_channels = heads * out_channels if concat_heads else out_channels
+        if with_bias:
+            self.bias = Parameter(torch.Tensor(self._out_channels))
         else:
             self.register_parameter("bias", None)
 
@@ -76,73 +78,76 @@ class GraphLayer(MessagePassing):
         zeros(self.att_em_j)
         zeros(self.bias)
 
-    def forward(self, x, edge_index, embedding, return_attention_weights=False):
+    def forward(self, x, edge_index, embedding):
+        """
+        x : has shape [N x batch_size, in_channels], where N is the number of nodes
+        edge_index : has shape [2, E x batch_size], where E is the number of edges
+                    with E = topk x N
+        embedding : has shape [N x batch_size, out_channels]
+        """
+        # linearly transform node feature matrix
+        assert torch.is_tensor(x)
+        x = self.lin(x)
+        x = (x, x)  #   ******************   FIXME: why a tuple????
 
-        if torch.is_tensor(x):
-            x = self.lin(x)
-            x = (x, x)
-        else:
-            x = (self.lin(x[0]), self.lin(x[1]))
-
+        # add self loops, nodes are in dim 0 of x
         edge_index, _ = remove_self_loops(edge_index)
         edge_index, _ = add_self_loops(edge_index, num_nodes=x[1].size(self.node_dim))
 
+        # propagate messages
         out = self.propagate(
             edge_index,
             x=x,
             embedding=embedding,
             edges=edge_index,
-            return_attention_weights=return_attention_weights,
         )
 
-        if self.concat:
-            out = out.view(-1, self.heads * self.out_channels)
-        else:
-            out = out.mean(dim=1)
+        # transform [N x batch_size, 1, _out_channels] to [N x batch_size, _out_channels]
+        out = out.view(-1, self._out_channels)
 
         if self.bias is not None:
             out = out + self.bias
 
-        if return_attention_weights:
-            alpha, self.__alpha__ = self.__alpha__, None
-            return out, (edge_index, alpha)
-        else:
-            return out
+        return out
 
-    def message(
-        self, x_i, x_j, edge_index_i, size_i, embedding, edges, return_attention_weights
-    ):
-
+    def message(self, x_i, x_j, edge_index_i, size_i, embedding, edges):
+        """
+        x_i :
+        x_j :
+        edge_index_i : has shape [(topk x N x batch_size)] ****************** FIXME: what is the purpose of this?
+        size_i : int with value (N x batch_size)
+        embedding : has shape [(N x batch_size), out_channels]
+        edges : has shape [(topk x N x batch_size)] ****************** FIXME: what is the purpose of this?
+        """
+        # transform from [..., out_channels] to [..., 1, out_channels]
         x_i = x_i.view(-1, self.heads, self.out_channels)
         x_j = x_j.view(-1, self.heads, self.out_channels)
 
         if embedding is not None:
-            embedding_i, embedding_j = embedding[edge_index_i], embedding[edges[0]]
-            embedding_i = embedding_i.unsqueeze(1).repeat(1, self.heads, 1)
-            embedding_j = embedding_j.unsqueeze(1).repeat(1, self.heads, 1)
+            # [(topk x N x batch_size), 1, out_channels]
+            embedding_i = embedding[edge_index_i].unsqueeze(1).repeat(1, self.heads, 1)
+            embedding_j = embedding[edges[0]].unsqueeze(1).repeat(1, self.heads, 1)
 
-            key_i = torch.cat(
-                (x_i, embedding_i), dim=-1
-            )  # key_i's are the g_i's, does x_i already have W?
+            # [(topk x N x batch_size), 1, 2 x out_channels]
+            key_i = torch.cat((x_i, embedding_i), dim=-1)
             key_j = torch.cat(
                 (x_j, embedding_j), dim=-1
             )  # concatenates along the last dim, i.e. columns in this case
 
+        # concatenate learnable parameters to become [1, 1, 2 x out_channels]
         cat_att_i = torch.cat((self.att_i, self.att_em_i), dim=-1)
         cat_att_j = torch.cat((self.att_j, self.att_em_j), dim=-1)
 
+        # [(topk x N x batch_size), 1]
         alpha = (key_i * cat_att_i).sum(-1) + (key_j * cat_att_j).sum(
             -1
-        )  # eqn (6) but...
+        )  # the matrix multiplication between a^T and g's in eqn (7)
         alpha = alpha.view(-1, self.heads, 1)
-        alpha = F.leaky_relu(alpha, self.negative_slope)  # eqn (7)
+        alpha = F.leaky_relu(alpha, self.negative_slope)
         alpha = softmax(alpha, edge_index_i, size_i)  # eqn (8)
-
-        if return_attention_weights:
-            self.__alpha__ = alpha
-
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
+        # multiply node feature by alpha
         return x_j * alpha.view(-1, self.heads, 1)
 
     def __repr__(self):
@@ -157,18 +162,21 @@ class OutLayer(nn.Module):
     timeseries embedding, v_i, and use the
     """
 
-    # in_num=64, layer_num=1, inter_num=256
-    def __init__(self, in_num, layer_num, inter_num=512):
-
+    def __init__(self, in_num, layer_num, inter_dim):
+        """
+        in_num : int, input dimension
+        layer_num : int, number of layers
+        inter_dim : int, internal dimensions of layers
+        """
         super(OutLayer, self).__init__()
         modules = []
         for i in range(layer_num):
             if i == layer_num - 1:
-                modules.append(nn.Linear(in_num if layer_num == 1 else inter_num, 1))
+                modules.append(nn.Linear(in_num if layer_num == 1 else inter_dim, 1))
             else:
-                layer_in_num = in_num if i == 0 else inter_num
-                modules.append(nn.Linear(layer_in_num, inter_num))
-                modules.append(nn.BatchNorm1d(inter_num))
+                layer_in_num = in_num if i == 0 else inter_dim
+                modules.append(nn.Linear(layer_in_num, inter_dim))
+                modules.append(nn.BatchNorm1d(inter_dim))
                 modules.append(nn.ReLU())
 
         self.mlp = nn.ModuleList(modules)
@@ -195,23 +203,15 @@ class GNNLayer(nn.Module):
     def __init__(self, in_channel, out_channel, heads=1):
         super(GNNLayer, self).__init__()
 
-        self.gnn = GraphLayer(in_channel, out_channel, heads=heads, concat=False)
-
+        self.gnn = GraphLayer(in_channel, out_channel, heads=heads, concat_heads=False)
         self.bn = nn.BatchNorm1d(out_channel)
         self.relu = nn.ReLU()
         self.leaky_relu = nn.LeakyReLU()
 
     def forward(self, x, edge_index, embedding=None):
 
-        out, (new_edge_index, att_weight) = self.gnn(
-            x, edge_index, embedding, return_attention_weights=True
-        )  # out, (edge_index, alpha)
-
-        self.att_weight_1 = att_weight
-        self.edge_index_1 = new_edge_index
-
+        out = self.gnn(x, edge_index, embedding)
         out = self.bn(out)
-
         return self.relu(out)
 
 
@@ -222,7 +222,7 @@ class GDN(nn.Module):
         n_nodes,
         embed_dim=64,
         out_layer_inter_dim=256,
-        input_dim=10,
+        slide_win=15,
         out_layer_num=1,
         topk=20,
     ):
@@ -232,7 +232,7 @@ class GDN(nn.Module):
         self.n_nodes = n_nodes
         self.embed_dim = embed_dim
         self.out_layer_inter_dim = out_layer_inter_dim
-        self.input_dim = input_dim
+        self.slide_win = slide_win
         self.out_layer_num = out_layer_num
         self.topk = topk
 
@@ -244,7 +244,7 @@ class GDN(nn.Module):
         self.gnn_layers = nn.ModuleList(
             [
                 GNNLayer(
-                    self.input_dim,
+                    self.slide_win,
                     self.embed_dim,
                     heads=1,
                 )
@@ -255,7 +255,7 @@ class GDN(nn.Module):
         self.learned_graph = None
 
         self.out_layer = OutLayer(
-            self.embed_dim, self.out_layer_num, inter_num=self.out_layer_inter_dim
+            self.embed_dim, self.out_layer_num, inter_dim=self.out_layer_inter_dim
         )
 
         self.cache_fc_edge_idx = None
@@ -268,32 +268,31 @@ class GDN(nn.Module):
 
         x = data.clone().detach()
         device = data.device
-        batch_num, n_nodes, all_feature = x.shape
-        x = x.view(-1, all_feature).contiguous()
+        batch_size, n_nodes, all_feature = x.shape  # 128 x 27 x 15
+        x = x.view(-1, all_feature).contiguous()  # (128 x 27) x 15
 
         if self.cache_fc_edge_idx is None:
             self.cache_fc_edge_idx = get_batch_edge_index(
-                self.fc_edge_idx, batch_num, n_nodes
+                self.fc_edge_idx, batch_size, n_nodes
             ).to(device)
 
-        all_embeddings = self.embedding(torch.arange(n_nodes).to(device))  # v_i's
-
+        all_embeddings = self.embedding(torch.arange(n_nodes).to(device))  # 27 x 64
         weights_arr = all_embeddings.detach().clone()
-        all_embeddings = all_embeddings.repeat(batch_num, 1)
+        all_embeddings = all_embeddings.repeat(batch_size, 1)  # (128 x 27) x 64
 
-        weights = weights_arr.view(n_nodes, -1)
+        weights = weights_arr.view(n_nodes, -1)  # 27 x 64
 
-        cos_ji_mat = torch.matmul(weights, weights.T)  # e_{ji} in eqn (2)
+        # e_{ji} in eqn (2)
+        cos_ji_mat = torch.matmul(weights, weights.T)  # 27 x 27
         normed_mat = torch.matmul(
             weights.norm(dim=-1).view(-1, 1), weights.norm(dim=-1).view(1, -1)
-        )
-        cos_ji_mat = cos_ji_mat / normed_mat
+        )  # 27 x 27 (27 x 1 . 1 x 27)
+        cos_ji_mat = cos_ji_mat / normed_mat  # 27 x 27
 
-        topk_indices_ji = torch.topk(cos_ji_mat, self.topk, dim=-1)[
-            1
-        ]  # A_{ji} in eqn (3)
+        # A_{ji} in eqn (3)
+        topk_indices_ji = torch.topk(cos_ji_mat, self.topk, dim=-1)[1]
 
-        self.learned_graph = topk_indices_ji
+        self.learned_graph = topk_indices_ji  # 27 x 20
 
         gated_i_ = torch.arange(0, n_nodes)
         gated_i = (
@@ -303,21 +302,27 @@ class GDN(nn.Module):
             .flatten()
             .to(device)
             .unsqueeze(0)
-        )
+        )  # 1 x (20 x 27)
 
-        gated_j = topk_indices_ji.flatten().unsqueeze(0)
-        gated_edge_index = torch.cat((gated_j, gated_i), dim=0)
+        gated_j = topk_indices_ji.flatten().unsqueeze(0)  # 1 x (20 x 27)
+        gated_edge_index = torch.cat((gated_j, gated_i), dim=0)  # 2 x (20 x 27)
 
         batch_gated_edge_index = get_batch_edge_index(
-            gated_edge_index, batch_num, n_nodes
-        ).to(device)
+            gated_edge_index, batch_size, n_nodes
+        ).to(
+            device
+        )  # 2 x (20 x 27 x 128)
 
         gcn_out = self.gnn_layers[0](
-            x,
-            batch_gated_edge_index,
-            embedding=all_embeddings,
+            x,  # (128 x 27) x 15 = 3456 x 15
+            batch_gated_edge_index,  # 2 x (20 x 27 x 128) = 2 x 69120
+            embedding=all_embeddings,  # (128 x 27) x 64 = 3456 x 64
         )
-        gcn_out = gcn_out.view(batch_num, n_nodes, -1)
+        gcn_out = gcn_out.view(batch_size, n_nodes, -1)
+        # 31 x 27 x 64 GraphLayer
+        # 128 x 27 x 64 BatchNorm1d
+        # 128 x 27 x 64 ReLU
+        # 23 x 27 x 64 LeakyReLU
 
         idxs = torch.arange(0, n_nodes).to(device)
         out = torch.mul(gcn_out, self.embedding(idxs))
@@ -327,17 +332,20 @@ class GDN(nn.Module):
         out = self.dp(out)
         out = self.out_layer(out)
         out = out.view(-1, n_nodes)
+        # 128 x 27 BatchNorm1d
+        # 128 x 27 ReLU
+        # 23 x 27 LeakyReLU
 
         return out
 
 
-def get_batch_edge_index(org_edge_index, batch_num, n_nodes):
+def get_batch_edge_index(org_edge_index, batch_size, n_nodes):
 
     edge_index = org_edge_index.clone().detach()
     edge_num = org_edge_index.shape[1]
-    batch_edge_index = edge_index.repeat(1, batch_num).contiguous()
+    batch_edge_index = edge_index.repeat(1, batch_size).contiguous()
 
-    for i in range(batch_num):
+    for i in range(batch_size):
         batch_edge_index[:, i * edge_num : (i + 1) * edge_num] += i * n_nodes
 
     return batch_edge_index.long()
@@ -364,7 +372,6 @@ class GNNAD:
         topk: int = 20,
         data_subdir: str = "msl",
         device: str = "cpu",
-        report: str = "best",
         save_model_name: str = "",
         early_stop_win: int = 15,
         lr: float = 0.001,
@@ -386,7 +393,6 @@ class GNNAD:
         self.topk = topk
         self.data_subdir = data_subdir
         self.device = device
-        self.report = report
         self.save_model_name = save_model_name
         self.early_stop_win = early_stop_win
         self.lr = lr
@@ -492,7 +498,7 @@ class GNNAD:
         model = GDN(
             self.fc_edge_idx,
             n_nodes=self.n_nodes,
-            input_dim=self.slide_win,
+            slide_win=self.slide_win,
             out_layer_num=self.out_layer_num,
             out_layer_inter_dim=self.out_layer_inter_dim,
             topk=self.topk,
@@ -636,6 +642,8 @@ class GNNAD:
         _, self.test_result = self._test(best_model, self.test_dataloader)
         _, self.validate_result = self._test(best_model, self.validate_dataloader)
 
+        # print(self.validate_result)
+
         test_labels = self.test_result[2, :, 0]
         test_err_scores = get_full_err_scores(self.test_result)
         validate_err_scores = get_full_err_scores(self.validate_result)
@@ -647,6 +655,8 @@ class GNNAD:
         # get threshold value
         if self.threshold_type == "max_validation":
             threshold = np.max(validate_err_scores)
+            # print(threshold)
+            # print(validate_err_scores)
             f1 = None
         else:
             final_topk_fmeas, thresholds = eval_scores(topk_err_scores, test_labels)
@@ -668,6 +678,7 @@ class GNNAD:
         auc = roc_auc_score(test_labels, topk_err_scores)
 
         # save to self
+        self.test_err_scores = test_err_scores
         self.topk_err_indices = topk_err_indices
         self.topk_err_scores = topk_err_scores
         self.pred_labels = pred_labels
@@ -730,7 +741,7 @@ def str_time_elapsed(start, i, total):
 def get_full_err_scores(test_result):
 
     all_scores = None
-    feature_num = test_result.shape[-1]
+    feature_num = test_result.shape[-1]  # FIXME: replace with self.n_nodes
 
     for i in range(feature_num):
         test_result_list = test_result[:2, :, i]
